@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from fastapi import FastAPI
 
 from app.config import load_settings
 from app.models import MetricsSummary, RouteRequest, RouteResponse
 from app.providers.mock_provider import MockLLMProvider
 from app.router import RoutingEngine
-from app.services.telemetry import InMemoryTelemetryStore
+from app.services.evaluation import score_completion
+from app.services.telemetry import TelemetryStore
 
-app = FastAPI(title="LLM Routing Engine", version="0.1.0")
+app = FastAPI(title="LLM Routing Engine", version="0.2.0")
 
 _settings = load_settings()
 _provider = MockLLMProvider()
-_telemetry = InMemoryTelemetryStore()
+_db_path = Path(os.getenv("TELEMETRY_DB", "telemetry.db"))
+_telemetry = TelemetryStore(db_path=_db_path)
 _engine = RoutingEngine(settings=_settings, provider=_provider, telemetry=_telemetry)
 
 
@@ -29,3 +34,10 @@ def infer(payload: RouteRequest) -> RouteResponse:
 @app.get("/v1/metrics/summary", response_model=MetricsSummary)
 def metrics_summary() -> MetricsSummary:
     return MetricsSummary(**_telemetry.summary())
+
+
+@app.get("/v1/eval/events")
+def eval_events(limit: int = 100) -> list[dict]:
+    """Return raw telemetry events for offline analysis."""
+    events = _telemetry.all_events()
+    return events[-limit:]

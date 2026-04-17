@@ -23,6 +23,8 @@ def test_simple_prompt_routes_to_cheap() -> None:
     body = response.json()
     assert body["route"]["selected_tier"] == "cheap"
     assert body["estimated_cost_usd"] >= 0
+    assert "request_id" in body
+    assert len(body["request_id"]) == 36  # UUID
 
 
 def test_complex_prompt_routes_to_premium() -> None:

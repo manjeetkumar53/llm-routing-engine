@@ -1,0 +1,46 @@
+{
+  "summaries": [
+    {
+      "mode": "router_v1",
+      "total_prompts": 50,
+      "routing_accuracy_pct": 80.0,
+      "cheap_count": 40,
+      "premium_count": 10,
+      "total_cost_usd": 0.004313,
+      "avg_cost_usd": 8.627e-05,
+      "avg_latency_ms": 1.01,
+      "p95_latency_ms": 3.07,
+      "fallback_count": 0
+    },
+    {
+      "mode": "always_cheap",
+      "total_prompts": 50,
+      "routing_accuracy_pct": 60.0,
+      "cheap_count": 50,
+      "premium_count": 0,
+      "total_cost_usd": 0.000465,
+      "avg_cost_usd": 9.3e-06,
+      "avg_latency_ms": 1.07,
+      "p95_latency_ms": 3.69,
+      "fallback_count": 0
+    },
+    {
+      "mode": "always_premium",
+      "total_prompts": 50,
+      "routing_accuracy_pct": 40.0,
+      "cheap_count": 0,
+      "premium_count": 50,
+      "total_cost_usd": 0.012525,
+      "avg_cost_usd": 0.0002505,
+      "avg_latency_ms": 0.96,
+      "p95_latency_ms": 2.34,
+      "fallback_count": 0
+    }
+  ],
+  "comparison": {
+    "router_vs_premium_cost_savings_pct": 65.6,
+    "router_routing_accuracy_pct": 80.0,
+    "premium_baseline_cost_usd": 0.012525,
+    "router_cost_usd": 0.004313
+  }
+}

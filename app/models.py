@@ -21,7 +21,16 @@ class UsageData(BaseModel):
     output_tokens: int
 
 
+class QualityScore(BaseModel):
+    keyword_recall: float
+    length_ratio: float
+    tier_alignment: float
+    total: float
+    acceptable: bool
+
+
 class RouteResponse(BaseModel):
+    request_id: str
     route: RouteDecision
     completion: str
     usage: UsageData
@@ -29,6 +38,7 @@ class RouteResponse(BaseModel):
     estimated_cost_usd: float
     fallback_used: bool
     experiment_mode: str
+    quality: QualityScore
 
 
 class MetricsSummary(BaseModel):

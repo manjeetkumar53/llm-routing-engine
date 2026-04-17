@@ -4,10 +4,11 @@ import time
 
 from app.config import Settings
 from app.experiment import ExperimentMode
-from app.models import RouteDecision, RouteResponse, UsageData
+from app.models import QualityScore, RouteDecision, RouteResponse, UsageData
 from app.providers.mock_provider import MockLLMProvider
 from app.services.complexity import score_prompt_complexity
 from app.services.costing import estimate_cost_usd
+from app.services.evaluation import score_completion
 from app.services.telemetry import InMemoryTelemetryStore, TelemetryEvent
 
 
@@ -68,16 +69,32 @@ class RoutingEngine:
         price = self._settings.prices[route.selected_tier]
         cost = estimate_cost_usd(in_tokens, out_tokens, price)
 
-        self._telemetry.add(
-            TelemetryEvent(
-                selected_tier=route.selected_tier,
-                latency_ms=latency_ms,
-                estimated_cost_usd=cost,
-                experiment_mode=mode.value,
-            )
+        event = TelemetryEvent(
+            selected_tier=route.selected_tier,
+            latency_ms=latency_ms,
+            estimated_cost_usd=cost,
+            experiment_mode=mode.value,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            complexity_score=route.complexity_score,
+        )
+        self._telemetry.add(event)
+
+        # Derive expected tier from complexity for inline quality scoring
+        expected_tier = (
+            "premium"
+            if route.complexity_score >= self._settings.complexity_threshold
+            else "cheap"
+        )
+        quality_raw = score_completion(
+            prompt=prompt,
+            completion=completion,
+            selected_tier=route.selected_tier,
+            expected_tier=expected_tier,
         )
 
         return RouteResponse(
+            request_id=event.request_id,
             route=route,
             completion=completion,
             usage=UsageData(input_tokens=in_tokens, output_tokens=out_tokens),
@@ -85,4 +102,5 @@ class RoutingEngine:
             estimated_cost_usd=cost,
             fallback_used=fallback_used,
             experiment_mode=mode.value,
+            quality=QualityScore(**quality_raw),
         )
