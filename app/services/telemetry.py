@@ -8,6 +8,7 @@ class TelemetryEvent:
     selected_tier: str
     latency_ms: float
     estimated_cost_usd: float
+    experiment_mode: str = "router_v1"
 
 
 class InMemoryTelemetryStore:
@@ -25,13 +26,16 @@ class InMemoryTelemetryStore:
                 "by_tier": {"cheap": 0, "premium": 0},
                 "average_latency_ms": 0.0,
                 "average_cost_usd": 0.0,
+                "by_experiment_mode": {},
             }
 
-        by_tier = {"cheap": 0, "premium": 0}
+        by_tier: dict[str, int] = {"cheap": 0, "premium": 0}
+        by_mode: dict[str, int] = {}
         total_latency = 0.0
         total_cost = 0.0
         for event in self._events:
             by_tier[event.selected_tier] = by_tier.get(event.selected_tier, 0) + 1
+            by_mode[event.experiment_mode] = by_mode.get(event.experiment_mode, 0) + 1
             total_latency += event.latency_ms
             total_cost += event.estimated_cost_usd
 
@@ -40,4 +44,5 @@ class InMemoryTelemetryStore:
             "by_tier": by_tier,
             "average_latency_ms": round(total_latency / total, 2),
             "average_cost_usd": round(total_cost / total, 8),
+            "by_experiment_mode": by_mode,
         }

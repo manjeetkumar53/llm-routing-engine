@@ -23,7 +23,7 @@ def health() -> dict[str, str]:
 
 @app.post("/v1/route/infer", response_model=RouteResponse)
 def infer(payload: RouteRequest) -> RouteResponse:
-    return _engine.infer(payload.prompt)
+    return _engine.infer(payload.prompt, mode=payload.experiment_mode)
 
 
 @app.get("/v1/metrics/summary", response_model=MetricsSummary)

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.experiment import ExperimentMode
+
 
 class RouteRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=12000)
+    experiment_mode: ExperimentMode = ExperimentMode.ROUTER_V1
 
 
 class RouteDecision(BaseModel):
@@ -25,6 +28,7 @@ class RouteResponse(BaseModel):
     latency_ms: float
     estimated_cost_usd: float
     fallback_used: bool
+    experiment_mode: str
 
 
 class MetricsSummary(BaseModel):
@@ -32,3 +36,4 @@ class MetricsSummary(BaseModel):
     by_tier: dict[str, int]
     average_latency_ms: float
     average_cost_usd: float
+    by_experiment_mode: dict[str, int]

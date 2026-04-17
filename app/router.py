@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 from app.config import Settings
+from app.experiment import ExperimentMode
 from app.models import RouteDecision, RouteResponse, UsageData
 from app.providers.mock_provider import MockLLMProvider
 from app.services.complexity import score_prompt_complexity
@@ -21,18 +22,35 @@ class RoutingEngine:
         self._provider = provider
         self._telemetry = telemetry
 
-    def _select_tier(self, prompt: str) -> RouteDecision:
+    def _select_tier(
+        self,
+        prompt: str,
+        mode: ExperimentMode,
+    ) -> RouteDecision:
         score, reason_codes = score_prompt_complexity(prompt)
-        selected_tier = "premium" if score >= self._settings.complexity_threshold else "cheap"
-        reason_codes.append(f"threshold={self._settings.complexity_threshold}")
+
+        if mode == ExperimentMode.ALWAYS_PREMIUM:
+            selected_tier = "premium"
+            reason_codes = ["experiment_always_premium"]
+        elif mode == ExperimentMode.ALWAYS_CHEAP:
+            selected_tier = "cheap"
+            reason_codes = ["experiment_always_cheap"]
+        else:
+            selected_tier = "premium" if score >= self._settings.complexity_threshold else "cheap"
+            reason_codes.append(f"threshold={self._settings.complexity_threshold}")
+
         return RouteDecision(
             selected_tier=selected_tier,
             reason_codes=reason_codes,
             complexity_score=round(score, 4),
         )
 
-    def infer(self, prompt: str) -> RouteResponse:
-        route = self._select_tier(prompt)
+    def infer(
+        self,
+        prompt: str,
+        mode: ExperimentMode = ExperimentMode.ROUTER_V1,
+    ) -> RouteResponse:
+        route = self._select_tier(prompt, mode)
         fallback_used = False
         start = time.perf_counter()
 
@@ -55,6 +73,7 @@ class RoutingEngine:
                 selected_tier=route.selected_tier,
                 latency_ms=latency_ms,
                 estimated_cost_usd=cost,
+                experiment_mode=mode.value,
             )
         )
 
@@ -65,4 +84,5 @@ class RoutingEngine:
             latency_ms=latency_ms,
             estimated_cost_usd=cost,
             fallback_used=fallback_used,
+            experiment_mode=mode.value,
         )
