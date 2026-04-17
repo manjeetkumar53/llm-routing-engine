@@ -4,134 +4,251 @@
   <img src="https://img.shields.io/badge/Python-3.13-3776AB?style=flat-square&logo=python&logoColor=white" />
   <img src="https://img.shields.io/badge/FastAPI-0.116-009688?style=flat-square&logo=fastapi&logoColor=white" />
   <img src="https://img.shields.io/badge/Tests-31%20passing-2ea44f?style=flat-square&logo=pytest&logoColor=white" />
-  <img src="https://img.shields.io/badge/Cost%20Reduction-65.6%25-FF6B35?style=flat-square" />
-  <img src="https://img.shields.io/badge/Routing%20Accuracy-80%25-6554C0?style=flat-square" />
   <img src="https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square" />
 </p>
 
-<br/>
+Policy-driven LLM routing for teams that want lower cost without blindly downgrading quality. The service scores prompt complexity, chooses a cheap or premium tier, executes with reliability guards, and records telemetry for every request.
 
-**A production-grade, policy-driven LLM routing service.** Classifies prompt complexity at request time, routes to the cheapest viable model tier, measures cost and output quality per request, and supports A/B experimentation across routing policies — with circuit-breaker reliability and structured observability throughout.
-
-Built to answer one question most teams avoid: *are we using the right model for each request, or just the most expensive one?*
+It is built around one practical question: should this prompt really hit the expensive model?
 
 ---
 
-## How It Works
+## What It Does
 
-Every request passes through four stages:
-
-```
-Prompt
-  │
-  ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  1. Complexity Scoring                                          │
-│     16 weighted signals: keyword intent, length, sentence       │
-│     density, question count → score in [0.0, 1.0]              │
-└──────────────────────┬──────────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  2. Routing Policy                                              │
-│     score ≥ threshold  →  premium tier                         │
-│     score  < threshold  →  cheap tier                           │
-│     experiment_mode override: always_cheap | always_premium     │
-└──────────────────────┬──────────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  3. Reliable Provider Call                                      │
-│     Circuit breaker (CLOSED → OPEN → HALF_OPEN)                │
-│     Retry with exponential backoff                              │
-│     Auto-fallback: cheap failure → premium                      │
-└──────────────────────┬──────────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  4. Telemetry + Evaluation                                      │
-│     SQLite persistence · per-request cost · quality proxy       │
-│     request_id tracing · structured JSON logs                   │
-└─────────────────────────────────────────────────────────────────┘
-  │
-  ▼
-Response: completion + route decision + cost + quality score + request_id
-```
+- Scores each prompt with a weighted complexity heuristic
+- Routes to `cheap` or `premium` based on a configurable threshold
+- Supports `router_v1`, `always_cheap`, and `always_premium` experiment modes
+- Adds retry, circuit breaker, and cheap-to-premium fallback behavior
+- Persists telemetry in SQLite with request IDs, cost, latency, tokens, and mode
+- Exposes metrics and raw event endpoints for analysis
+- Includes a Streamlit dashboard and a benchmark harness
+- Can run with the bundled mock provider or real providers: Ollama, OpenAI, Anthropic
 
 ---
 
-## Benchmark Results
+## Request Flow
 
-Evaluated on a labeled dataset of 50 prompts spanning simple factual queries through complex multi-step architectural analysis.
+```text
+prompt
+  -> complexity scorer
+  -> routing policy
+  -> provider call (retry + circuit breaker)
+  -> fallback if needed
+  -> telemetry + inline quality scoring
+  -> response with cost, tier, quality, request_id
+```
 
-| Policy | Routing Accuracy | Cost / 50 Requests | vs Always-Premium |
-|---|---|---|---|
-| **`router_v1`** | **80%** | **$0.004313** | **−65.6%** |
-| `always_cheap` | 60% | $0.000465 | −96.3% |
-| `always_premium` | 40% | $0.012525 | baseline |
+Core response fields from `POST /v1/route/infer`:
 
-**Key finding:** `always_cheap` is not the answer — it under-provisions complex prompts and degrades output quality. `router_v1` finds the optimal operating point: the cheapest routing that keeps quality acceptable.
+- `route.selected_tier`
+- `route.complexity_score`
+- `route.reason_codes`
+- `estimated_cost_usd`
+- `latency_ms`
+- `quality.total`
+- `request_id`
 
 ---
 
-## System Design
+## Benchmark Snapshot
 
+The repository includes a 50-prompt labeled benchmark dataset and a benchmark runner that compares all three routing modes.
+
+Important: the checked-in benchmark numbers are produced with the bundled mock provider and configured token prices. They are useful for validating routing behavior and cost math, not as a claim about real-model quality.
+
+| Policy | Routing Accuracy | Cost / 50 Requests | vs Always Premium |
+|---|---:|---:|---:|
+| `router_v1` | 80.0% | $0.004313 | -65.6% |
+| `always_cheap` | 60.0% | $0.000465 | -96.3% |
+| `always_premium` | 40.0% | $0.012525 | baseline |
+
+Takeaway: forcing everything to the cheapest model is not the same as optimizing cost. The point of the router is to reduce spend while preserving acceptable routing quality.
+
+---
+
+## Quick Start
+
+```bash
+git clone https://github.com/manjeetkumar53/llm-routing-engine.git
+cd llm-routing-engine
+
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│                          FastAPI Service                           │
-│                                                                    │
-│   POST /v1/route/infer          GET /v1/metrics/summary            │
-│   GET  /v1/eval/events          GET /v1/circuit-breaker/status     │
-│                                 GET /health                        │
-│                                                                    │
-│  RequestLoggingMiddleware                                          │
-│  → X-Request-ID propagation · X-Latency-MS · structured JSON logs │
-│                                                                    │
-│  ┌──────────────────┐    ┌──────────────────────────────────────┐  │
-│  │ ComplexityScorer │───▶│         RoutingEngine                │  │
-│  │                  │    │                                      │  │
-│  │ Keyword weights  │    │  ExperimentMode:                     │  │
-│  │ Length signal    │    │    router_v1 (default)               │  │
-│  │ Sentence count   │    │    always_cheap                      │  │
-│  │ Question density │    │    always_premium                    │  │
-│  │ Simplicity hints │    └────────────────┬─────────────────────┘  │
-│  └──────────────────┘                     │                        │
-│                                           ▼                        │
-│                              ┌────────────────────────┐            │
-│                              │    CircuitBreaker      │            │
-│                              │  CLOSED→OPEN→HALF_OPEN │            │
-│                              │  + retry backoff       │            │
-│                              └──────────┬─────────────┘            │
-│                                         │                          │
-│                              ┌──────────▼─────────────┐            │
-│                              │    Model Provider       │            │
-│                              │  cheap  │  premium      │            │
-│                              └──────────┬──────────────┘            │
-│                                         │                          │
-│  ┌──────────────────────────────────────▼───────────────────────┐  │
-│  │                  Telemetry Store (SQLite)                    │  │
-│  │  request_id · created_at · tier · cost · latency · tokens   │  │
-│  │  complexity_score · experiment_mode · quality_score          │  │
-│  └──────────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────┘
-                                    │
-                    ┌───────────────▼──────────────┐
-                    │   Streamlit Dashboard         │
-                    │  Tier split · Cost trend      │
-                    │  Latency dist · Mode compare  │
-                    │  Benchmark: cost vs accuracy  │
-                    └───────────────────────────────┘
+
+Run with the default mock provider:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+Open:
+
+- API docs: `http://127.0.0.1:8000/docs`
+- Health: `http://127.0.0.1:8000/health`
+
+Example request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/route/infer \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Explain vector databases in simple terms."}'
 ```
 
 ---
 
-## API
+## Run With Real LLMs
 
-### `POST /v1/route/infer`
+Provider selection is environment-driven. The app reads `LLM_PROVIDER` at startup and instantiates the correct provider automatically.
 
-Routes a prompt and returns routing decision, completion, cost, quality, and tracing metadata.
+Supported values:
 
-**Request**
+- `mock`
+- `ollama`
+- `openai`
+- `anthropic`
+
+### Ollama
+
+Best option for local testing.
+
+```bash
+ollama pull llama3.2:1b
+ollama pull llama3.1:8b
+
+export LLM_PROVIDER=ollama
+uvicorn app.main:app --reload
+```
+
+Optional overrides:
+
+```bash
+export OLLAMA_CHEAP_MODEL=llama3.2:1b
+export OLLAMA_PREMIUM_MODEL=llama3.1:8b
+export OLLAMA_BASE_URL=http://localhost:11434/api/chat
+```
+
+### OpenAI
+
+Install the SDK first because it is intentionally optional.
+
+```bash
+pip install openai
+export OPENAI_API_KEY=sk-...
+export LLM_PROVIDER=openai
+uvicorn app.main:app --reload
+```
+
+Default mapping in the provider:
+
+- cheap: `gpt-4o-mini`
+- premium: `gpt-4o`
+
+### Anthropic
+
+```bash
+pip install anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+export LLM_PROVIDER=anthropic
+uvicorn app.main:app --reload
+```
+
+Default mapping in the provider:
+
+- cheap: `claude-haiku-4-5`
+- premium: `claude-opus-4-5`
+
+### Pricing Configuration
+
+Cost reporting depends on your configured token prices. Update the values to match the models you actually use.
+
+```env
+CHEAP_INPUT_PRICE_PER_1M=0.15
+CHEAP_OUTPUT_PRICE_PER_1M=0.60
+PREMIUM_INPUT_PRICE_PER_1M=5.00
+PREMIUM_OUTPUT_PRICE_PER_1M=15.00
+```
+
+---
+
+## How To Test It
+
+Health check:
+
+```bash
+curl -s http://127.0.0.1:8000/health
+```
+
+Simple prompt, usually cheap:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/route/infer \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"What is machine learning?"}'
+```
+
+Complex prompt, usually premium:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/route/infer \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Design a scalable event-driven microservice architecture for a fintech platform and compare the trade-offs of CQRS and event sourcing."}'
+```
+
+Force experiment modes:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/route/infer \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Explain Kubernetes autoscaling.","experiment_mode":"always_cheap"}'
+
+curl -s -X POST http://127.0.0.1:8000/v1/route/infer \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Explain Kubernetes autoscaling.","experiment_mode":"always_premium"}'
+```
+
+Inspect metrics and telemetry:
+
+```bash
+curl -s http://127.0.0.1:8000/v1/metrics/summary
+curl -s "http://127.0.0.1:8000/v1/eval/events?limit=20"
+curl -s http://127.0.0.1:8000/v1/circuit-breaker/status
+```
+
+Run the automated tests:
+
+```bash
+pytest -q
+```
+
+Run the benchmark harness:
+
+```bash
+python -m benchmark.run
+```
+
+Open the dashboard:
+
+```bash
+streamlit run dashboard/app.py
+```
+
+---
+
+## API Surface
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/route/infer` | Route a prompt and return completion, cost, quality, and routing details |
+| `GET /health` | Basic service liveness |
+| `GET /v1/metrics/summary` | Aggregate metrics by tier and experiment mode |
+| `GET /v1/eval/events` | Raw telemetry events for offline analysis |
+| `GET /v1/circuit-breaker/status` | Current breaker state |
+| `GET /docs` | Swagger / OpenAPI UI |
+
+Example request:
+
 ```json
 {
   "prompt": "Analyze the trade-offs between CQRS and event sourcing for a banking system.",
@@ -139,14 +256,15 @@ Routes a prompt and returns routing decision, completion, cost, quality, and tra
 }
 ```
 
-**Response**
+Example response shape:
+
 ```json
 {
   "request_id": "3f8a2c14-91e7-4b2d-bc43-7a1d9e204f88",
   "route": {
     "selected_tier": "premium",
-    "complexity_score": 0.7250,
-    "reason_codes": ["complexity_hints_present", "multi_sentence", "threshold=0.5"]
+    "complexity_score": 0.725,
+    "reason_codes": ["complexity_hints_present", "threshold=0.5"]
   },
   "completion": "...",
   "usage": {
@@ -167,294 +285,92 @@ Routes a prompt and returns routing decision, completion, cost, quality, and tra
 }
 ```
 
-### Other endpoints
-
-| Endpoint | Description |
-|---|---|
-| `GET /health` | Service health check |
-| `GET /v1/metrics/summary` | Aggregated stats by tier and experiment mode |
-| `GET /v1/eval/events?limit=100` | Paginated raw telemetry events |
-| `GET /v1/circuit-breaker/status` | Current breaker state |
-| `GET /docs` | Auto-generated OpenAPI / Swagger UI |
-
----
-
-## Experiment Modes
-
-Each request can declare an `experiment_mode` to override the routing policy. This enables controlled A/B testing between policies without changing service configuration.
-
-| Mode | Behaviour |
-|---|---|
-| `router_v1` | Complexity-scored routing (production default) |
-| `always_cheap` | Force cheap tier — cost floor baseline |
-| `always_premium` | Force premium tier — quality ceiling baseline |
-
-Telemetry records the mode on every event. The metrics summary breaks down cost and request counts by mode, so you can compare policies with real traffic.
-
----
-
-## Quality Scoring
-
-Every response includes a quality proxy score computed at inference time — no external LLM judge required.
-
-| Signal | Weight | Description |
-|---|---|---|
-| `keyword_recall` | 40% | Key terms from the prompt present in the completion |
-| `length_ratio` | 30% | Completion length relative to tier-appropriate floor |
-| `tier_alignment` | 30% | Penalty when a complex prompt is routed to cheap tier |
-
-A score ≥ 0.70 is considered acceptable. Scores below threshold flag potential routing mistakes for review.
-
----
-
-## Reliability
-
-The provider call path is hardened at three levels:
-
-1. **Retry with exponential backoff** — transient failures are retried up to N times before escalating
-2. **Circuit breaker** — trips after N consecutive failures; enters HALF_OPEN after a recovery timeout to probe health before resuming traffic
-3. **Automatic tier fallback** — cheap tier failure triggers an immediate retry on premium; circuit breaker open on cheap routes all traffic to premium until recovery
-
-These operate at the routing engine level, not the provider level, so fallback decisions have full context — including whether the request is already on a fallback path.
-
----
-
-## Running Locally
-
-**Prerequisites:** Python 3.13, git
-
-```bash
-git clone https://github.com/manjeetkumar53/llm-routing-engine.git
-cd llm-routing-engine
-
-python3.13 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-**Start the API**
-```bash
-uvicorn app.main:app --reload
-# Swagger UI → http://127.0.0.1:8000/docs
-```
-
-**Run the benchmark**
-```bash
-python -m benchmark.run
-# Outputs cost savings %, routing accuracy, p95 latency per mode
-```
-
-**Open the analytics dashboard**
-```bash
-streamlit run dashboard/app.py
-```
-
-**Run tests**
-```bash
-pytest -v
-# 31 tests: routing decisions, complexity scoring, reliability, quality eval, API contracts
-```
-
----
-
-## Connecting Real LLM Providers
-
-The service ships with a mock provider for testing. Swapping in a real model takes one file. The provider interface is:
-
-```python
-class MyProvider:
-    def complete(self, tier: str, prompt: str) -> tuple[str, int, int]:
-        # Returns: (completion_text, input_token_count, output_token_count)
-        ...
-```
-
-**OpenAI (GPT-4o as premium, GPT-4o-mini as cheap)**
-
-```python
-# app/providers/openai_provider.py
-from openai import OpenAI
-
-client = OpenAI()  # reads OPENAI_API_KEY from env
-
-TIER_MODEL = {
-    "cheap": "gpt-4o-mini",
-    "premium": "gpt-4o",
-}
-
-class OpenAIProvider:
-    def complete(self, tier: str, prompt: str) -> tuple[str, int, int]:
-        model = TIER_MODEL[tier]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        choice = response.choices[0].message.content
-        usage = response.usage
-        return choice, usage.prompt_tokens, usage.completion_tokens
-```
-
-Wire it in `app/main.py`:
-```python
-from app.providers.openai_provider import OpenAIProvider
-provider = OpenAIProvider()
-```
-
-Set pricing to match the models you chose:
-```env
-OPENAI_API_KEY=sk-...
-CHEAP_INPUT_PRICE_PER_1M=0.15      # gpt-4o-mini
-CHEAP_OUTPUT_PRICE_PER_1M=0.60
-PREMIUM_INPUT_PRICE_PER_1M=5.00    # gpt-4o
-PREMIUM_OUTPUT_PRICE_PER_1M=15.00
-```
-
----
-
-**Ollama (local models — no API key required)**
-
-```python
-# app/providers/ollama_provider.py
-import httpx
-
-TIER_MODEL = {
-    "cheap": "llama3.2:1b",
-    "premium": "llama3.1:8b",
-}
-
-class OllamaProvider:
-    BASE = "http://localhost:11434/api/chat"
-
-    def complete(self, tier: str, prompt: str) -> tuple[str, int, int]:
-        model = TIER_MODEL[tier]
-        resp = httpx.post(self.BASE, json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-        }, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["message"]["content"]
-        input_tokens = data.get("prompt_eval_count", max(1, len(prompt) // 4))
-        output_tokens = data.get("eval_count", max(8, len(content) // 4))
-        return content, input_tokens, output_tokens
-```
-
-Start Ollama and pull the models first:
-```bash
-ollama pull llama3.2:1b
-ollama pull llama3.1:8b
-ollama serve
-```
-
-Since Ollama is free to run locally, set token prices to `0` or to your actual GPU compute cost.
-
----
-
-**Anthropic Claude (claude-haiku as cheap, claude-opus as premium)**
-
-```python
-# app/providers/anthropic_provider.py
-import anthropic
-
-client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
-
-TIER_MODEL = {
-    "cheap": "claude-haiku-4-5",
-    "premium": "claude-opus-4-5",
-}
-
-class AnthropicProvider:
-    def complete(self, tier: str, prompt: str) -> tuple[str, int, int]:
-        model = TIER_MODEL[tier]
-        message = client.messages.create(
-            model=model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        content = message.content[0].text
-        return content, message.usage.input_tokens, message.usage.output_tokens
-```
-
-```env
-ANTHROPIC_API_KEY=sk-ant-...
-CHEAP_INPUT_PRICE_PER_1M=0.80      # claude-haiku-4-5
-CHEAP_OUTPUT_PRICE_PER_1M=4.00
-PREMIUM_INPUT_PRICE_PER_1M=15.00   # claude-opus-4-5
-PREMIUM_OUTPUT_PRICE_PER_1M=75.00
-```
-
----
-
-**General wiring pattern**
-
-All providers follow the same three steps:
-
-1. Create your provider file in `app/providers/`
-2. Import and instantiate it in `app/main.py` where `MockLLMProvider` is currently used
-3. Update `.env` with real token prices for accurate cost tracking
-
-The routing engine, circuit breaker, quality scorer, and telemetry all remain unchanged — they work against the `complete(tier, prompt)` interface regardless of which backend is behind it.
-
 ---
 
 ## Configuration
 
-All settings are read from environment variables. Copy `.env.example` and adjust.
+The app reads configuration from environment variables.
 
 ```env
-ROUTER_COMPLEXITY_THRESHOLD=0.50       # Prompts scoring >= this route to premium
-CHEAP_INPUT_PRICE_PER_1M=0.15         # USD per 1M input tokens (cheap tier)
+LLM_PROVIDER=mock
+
+# Optional API keys
+# OPENAI_API_KEY=sk-...
+# ANTHROPIC_API_KEY=sk-ant-...
+
+# Optional Ollama overrides
+# OLLAMA_BASE_URL=http://localhost:11434/api/chat
+# OLLAMA_CHEAP_MODEL=llama3.2:1b
+# OLLAMA_PREMIUM_MODEL=llama3.1:8b
+
+ROUTER_COMPLEXITY_THRESHOLD=0.50
+
+CHEAP_INPUT_PRICE_PER_1M=0.15
 CHEAP_OUTPUT_PRICE_PER_1M=0.60
-PREMIUM_INPUT_PRICE_PER_1M=5.00       # USD per 1M input tokens (premium tier)
+PREMIUM_INPUT_PRICE_PER_1M=5.00
 PREMIUM_OUTPUT_PRICE_PER_1M=15.00
-TELEMETRY_DB=telemetry.db             # SQLite file path
+
+TELEMETRY_DB=telemetry.db
 ```
 
 ---
 
-## Design Decisions
+## Design Notes
 
-**Rule-based scorer over ML classifier**
-A weighted rule system is explainable, zero-latency, and immediately debuggable. Each routing decision includes `reason_codes` so you can trace exactly why a prompt was sent to a given tier. The scoring weights are parameterized; a learned classifier is the natural next step once enough labeled routing decisions accumulate.
+**Why a rule-based scorer?**
 
-**Proxy quality scorer over LLM-as-judge**
-Running a judge model on every inference request doubles cost and adds latency on the critical path. The proxy (keyword recall + length + tier alignment) catches the most important class of failure — sending a complex prompt to the cheap model — and operates in microseconds. Post-hoc batch evaluation with an LLM judge remains an option for periodic quality audits.
+The scorer is transparent, cheap to run, and easy to tune. Every routing decision returns `reason_codes`, which makes behavior inspectable during development and evaluation.
 
-**Circuit breaker at the engine level, not provider level**
-The routing engine owns fallback logic. Placing the breaker here means fallback decisions have full context: which tier was originally selected, whether we're already in a fallback path, and what the current experiment mode is.
+**Why an inline quality proxy instead of LLM-as-judge?**
 
-**SQLite for telemetry persistence**
-Removes all operational overhead for the initial deployment. The schema is standard SQL; moving to PostgreSQL is a connection string change. At 10K requests/day, SQLite is not the bottleneck.
+The built-in quality score is designed for request-time feedback without adding another expensive model call. It is intentionally lightweight and should be treated as a proxy signal, not a final judgment layer.
+
+**Why SQLite?**
+
+For a small service or prototype, SQLite removes operational overhead while still preserving useful request history and aggregate metrics.
+
+**Where does reliability live?**
+
+Retry, circuit breaker, and fallback behavior live in the routing engine layer so decisions can account for the selected tier and the current experiment mode.
 
 ---
 
 ## Project Structure
 
-```
+```text
 app/
-├── config.py              Environment-based settings
-├── experiment.py          ExperimentMode enum
-├── main.py                FastAPI application and endpoint definitions
-├── middleware.py          Structured JSON logging, X-Request-ID propagation
-├── models.py              Pydantic request/response models
-├── reliability.py         CircuitBreaker + retry_with_backoff
-├── router.py              RoutingEngine — orchestrates all layers
-└── providers/
-│   └── mock_provider.py   Provider interface (swap in real adapters here)
-└── services/
-    ├── complexity.py       Weighted prompt complexity scorer (16 signals)
-    ├── costing.py          Per-request token cost estimation
-    ├── evaluation.py       Quality proxy scoring
-    └── telemetry.py        SQLite-backed event store
+  config.py
+  experiment.py
+  main.py
+  middleware.py
+  models.py
+  reliability.py
+  router.py
+  providers/
+    anthropic_provider.py
+    mock_provider.py
+    ollama_provider.py
+    openai_provider.py
+  services/
+    complexity.py
+    costing.py
+    evaluation.py
+    telemetry.py
 
 benchmark/
-├── prompts.json           50-prompt labeled evaluation dataset
-├── run.py                 Benchmark runner: cost, accuracy, latency by mode
-└── results.json           Most recent benchmark output
+  prompts.json
+  results.json
+  run.py
 
 dashboard/
-└── app.py                 Streamlit analytics dashboard (6 charts + KPIs)
+  app.py
 
-tests/                     31 tests across all modules
+tests/
+  conftest.py
+  test_complexity.py
+  test_evaluation.py
+  test_reliability.py
+  test_router.py
 ```
 
 ---
