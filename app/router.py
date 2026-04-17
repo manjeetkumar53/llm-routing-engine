@@ -6,6 +6,7 @@ from app.config import Settings
 from app.experiment import ExperimentMode
 from app.models import QualityScore, RouteDecision, RouteResponse, UsageData
 from app.providers.mock_provider import MockLLMProvider
+from app.reliability import CircuitBreaker, CircuitBreakerOpen, retry_with_backoff
 from app.services.complexity import score_prompt_complexity
 from app.services.costing import estimate_cost_usd
 from app.services.evaluation import score_completion
@@ -18,10 +19,12 @@ class RoutingEngine:
         settings: Settings,
         provider: MockLLMProvider,
         telemetry: InMemoryTelemetryStore,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self._settings = settings
         self._provider = provider
         self._telemetry = telemetry
+        self._breaker = breaker or CircuitBreaker()
 
     def _select_tier(
         self,
@@ -56,7 +59,22 @@ class RoutingEngine:
         start = time.perf_counter()
 
         try:
-            completion, in_tokens, out_tokens = self._provider.complete(route.selected_tier, prompt)
+            completion, in_tokens, out_tokens = retry_with_backoff(
+                self._breaker.call,
+                self._provider.complete,
+                route.selected_tier,
+                prompt,
+                max_attempts=2,
+            )
+        except CircuitBreakerOpen:
+            # Fail open: use premium if breaker is open on cheap side
+            if route.selected_tier == "cheap":
+                fallback_used = True
+                route = self._select_tier(prompt, ExperimentMode.ALWAYS_PREMIUM)
+                route.reason_codes.append("circuit_breaker_open_fallback")
+                completion, in_tokens, out_tokens = self._provider.complete("premium", prompt)
+            else:
+                raise
         except RuntimeError:
             if route.selected_tier != "cheap":
                 raise
