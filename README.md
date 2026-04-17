@@ -256,6 +256,146 @@ pytest -v
 
 ---
 
+## Connecting Real LLM Providers
+
+The service ships with a mock provider for testing. Swapping in a real model takes one file. The provider interface is:
+
+```python
+class MyProvider:
+    def complete(self, tier: str, prompt: str) -> tuple[str, int, int]:
+        # Returns: (completion_text, input_token_count, output_token_count)
+        ...
+```
+
+**OpenAI (GPT-4o as premium, GPT-4o-mini as cheap)**
+
+```python
+# app/providers/openai_provider.py
+from openai import OpenAI
+
+client = OpenAI()  # reads OPENAI_API_KEY from env
+
+TIER_MODEL = {
+    "cheap": "gpt-4o-mini",
+    "premium": "gpt-4o",
+}
+
+class OpenAIProvider:
+    def complete(self, tier: str, prompt: str) -> tuple[str, int, int]:
+        model = TIER_MODEL[tier]
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        choice = response.choices[0].message.content
+        usage = response.usage
+        return choice, usage.prompt_tokens, usage.completion_tokens
+```
+
+Wire it in `app/main.py`:
+```python
+from app.providers.openai_provider import OpenAIProvider
+provider = OpenAIProvider()
+```
+
+Set pricing to match the models you chose:
+```env
+OPENAI_API_KEY=sk-...
+CHEAP_INPUT_PRICE_PER_1M=0.15      # gpt-4o-mini
+CHEAP_OUTPUT_PRICE_PER_1M=0.60
+PREMIUM_INPUT_PRICE_PER_1M=5.00    # gpt-4o
+PREMIUM_OUTPUT_PRICE_PER_1M=15.00
+```
+
+---
+
+**Ollama (local models — no API key required)**
+
+```python
+# app/providers/ollama_provider.py
+import httpx
+
+TIER_MODEL = {
+    "cheap": "llama3.2:1b",
+    "premium": "llama3.1:8b",
+}
+
+class OllamaProvider:
+    BASE = "http://localhost:11434/api/chat"
+
+    def complete(self, tier: str, prompt: str) -> tuple[str, int, int]:
+        model = TIER_MODEL[tier]
+        resp = httpx.post(self.BASE, json={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+        }, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["message"]["content"]
+        input_tokens = data.get("prompt_eval_count", max(1, len(prompt) // 4))
+        output_tokens = data.get("eval_count", max(8, len(content) // 4))
+        return content, input_tokens, output_tokens
+```
+
+Start Ollama and pull the models first:
+```bash
+ollama pull llama3.2:1b
+ollama pull llama3.1:8b
+ollama serve
+```
+
+Since Ollama is free to run locally, set token prices to `0` or to your actual GPU compute cost.
+
+---
+
+**Anthropic Claude (claude-haiku as cheap, claude-opus as premium)**
+
+```python
+# app/providers/anthropic_provider.py
+import anthropic
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+
+TIER_MODEL = {
+    "cheap": "claude-haiku-4-5",
+    "premium": "claude-opus-4-5",
+}
+
+class AnthropicProvider:
+    def complete(self, tier: str, prompt: str) -> tuple[str, int, int]:
+        model = TIER_MODEL[tier]
+        message = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        content = message.content[0].text
+        return content, message.usage.input_tokens, message.usage.output_tokens
+```
+
+```env
+ANTHROPIC_API_KEY=sk-ant-...
+CHEAP_INPUT_PRICE_PER_1M=0.80      # claude-haiku-4-5
+CHEAP_OUTPUT_PRICE_PER_1M=4.00
+PREMIUM_INPUT_PRICE_PER_1M=15.00   # claude-opus-4-5
+PREMIUM_OUTPUT_PRICE_PER_1M=75.00
+```
+
+---
+
+**General wiring pattern**
+
+All providers follow the same three steps:
+
+1. Create your provider file in `app/providers/`
+2. Import and instantiate it in `app/main.py` where `MockLLMProvider` is currently used
+3. Update `.env` with real token prices for accurate cost tracking
+
+The routing engine, circuit breaker, quality scorer, and telemetry all remain unchanged — they work against the `complete(tier, prompt)` interface regardless of which backend is behind it.
+
+---
+
 ## Configuration
 
 All settings are read from environment variables. Copy `.env.example` and adjust.
