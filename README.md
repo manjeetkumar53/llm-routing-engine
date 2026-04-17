@@ -11,6 +11,17 @@ Policy-driven LLM routing for teams that want lower cost without blindly downgra
 
 It is built around one practical question: should this prompt really hit the expensive model?
 
+This is a portfolio-grade backend project focused on real inference-system concerns: cost control, model selection policy, failure handling, observability, and evaluation.
+
+---
+
+## Why This Repo Matters
+
+- Shows cost-aware LLM orchestration instead of a generic chat wrapper
+- Demonstrates production-minded backend design: retries, circuit breaker, fallback, telemetry, benchmarking
+- Supports multiple providers behind one contract, which makes the routing layer portable
+- Makes routing decisions inspectable with explicit reason codes and per-request quality metadata
+
 ---
 
 ## What It Does
@@ -95,6 +106,22 @@ curl -X POST http://127.0.0.1:8000/v1/route/infer \
   -H "Content-Type: application/json" \
   -d '{"prompt":"Explain vector databases in simple terms."}'
 ```
+
+---
+
+## Product Surfaces
+
+### Swagger UI
+
+The API ships with an interactive OpenAPI surface for manual testing and request inspection.
+
+![Swagger UI](assets/screenshots/swagger-ui.png)
+
+### Analytics Dashboard
+
+The Streamlit dashboard turns stored telemetry into request mix, latency, cost, and experiment comparison views.
+
+![Analytics Dashboard](assets/screenshots/dashboard-overview.png)
 
 ---
 
@@ -335,9 +362,51 @@ Retry, circuit breaker, and fallback behavior live in the routing engine layer s
 
 ---
 
+## Engineering Details
+
+**Provider contract**
+
+Every backend implements the same narrow interface:
+
+```python
+complete(tier: str, prompt: str) -> tuple[str, int, int]
+```
+
+That return shape keeps the router independent of provider SDK details while preserving the information needed for cost accounting.
+
+**Routing algorithm**
+
+The request path is deterministic:
+
+1. Score prompt complexity with weighted lexical and structural hints.
+2. Apply experiment mode override if present.
+3. Select `cheap` or `premium` using the configured threshold.
+4. Execute through retry and circuit breaker guards.
+5. Fall back from cheap to premium when the cheap path fails.
+6. Persist telemetry and compute the inline quality proxy.
+
+**What benchmark accuracy means**
+
+Benchmark accuracy here is routing accuracy, not answer-quality accuracy. A benchmark item is considered correct when the selected tier matches the labeled expected tier in `benchmark/prompts.json`.
+
+**What the quality score means**
+
+The built-in quality score is a proxy composed of keyword recall, completion length ratio, and tier alignment. It is useful for spotting likely routing mistakes in live traffic, but it is not a substitute for human evals or model-judge evals.
+
+**Failure model**
+
+The engine protects the provider call path with two attempts through `retry_with_backoff`. If the circuit is open on the cheap path or the cheap call raises a runtime failure, the router can escalate to premium and record that fallback in both the response and telemetry.
+
+---
+
 ## Project Structure
 
 ```text
+assets/
+  screenshots/
+    dashboard-overview.png
+    swagger-ui.png
+
 app/
   config.py
   experiment.py
