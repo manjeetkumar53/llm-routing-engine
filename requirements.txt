@@ -5,3 +5,8 @@ pytest==8.4.1
 httpx==0.28.1
 streamlit==1.46.0
 plotly==6.1.1
+
+# Optional: install only the provider(s) you need
+# openai>=1.0          (for LLM_PROVIDER=openai)
+# anthropic>=0.25      (for LLM_PROVIDER=anthropic)
+# ollama uses httpx which is already installed above

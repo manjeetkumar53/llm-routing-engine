@@ -20,7 +20,20 @@ app = FastAPI(title="LLM Routing Engine", version="0.3.0")
 app.add_middleware(RequestLoggingMiddleware)
 
 _settings = load_settings()
-_provider = MockLLMProvider()
+
+_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "mock").lower()
+
+if _LLM_PROVIDER == "openai":
+    from app.providers.openai_provider import OpenAIProvider
+    _provider: object = OpenAIProvider()
+elif _LLM_PROVIDER == "ollama":
+    from app.providers.ollama_provider import OllamaProvider
+    _provider = OllamaProvider()
+elif _LLM_PROVIDER == "anthropic":
+    from app.providers.anthropic_provider import AnthropicProvider
+    _provider = AnthropicProvider()
+else:
+    _provider = MockLLMProvider()
 _db_path = Path(os.getenv("TELEMETRY_DB", "telemetry.db"))
 _telemetry = TelemetryStore(db_path=_db_path)
 _breaker = CircuitBreaker(failure_threshold=5, recovery_timeout_s=30.0)
