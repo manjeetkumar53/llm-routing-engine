@@ -1,16 +1,328 @@
 # LLM Routing Engine
 
-> **Policy-driven LLM routing that reduces inference cost by ~65% while maintaining quality and reliability.**
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.13-3776AB?style=flat-square&logo=python&logoColor=white" />
+  <img src="https://img.shields.io/badge/FastAPI-0.116-009688?style=flat-square&logo=fastapi&logoColor=white" />
+  <img src="https://img.shields.io/badge/Tests-31%20passing-2ea44f?style=flat-square&logo=pytest&logoColor=white" />
+  <img src="https://img.shields.io/badge/Cost%20Reduction-65.6%25-FF6B35?style=flat-square" />
+  <img src="https://img.shields.io/badge/Routing%20Accuracy-80%25-6554C0?style=flat-square" />
+  <img src="https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square" />
+</p>
 
-A production-grade service that classifies prompt complexity, routes requests to the cheapest viable model tier, tracks cost/latency/quality per request, and exposes a live analytics dashboard — all with circuit-breaker protection and structured observability.
+<br/>
+
+**A production-grade, policy-driven LLM routing service.** Classifies prompt complexity at request time, routes to the cheapest viable model tier, measures cost and output quality per request, and supports A/B experimentation across routing policies — with circuit-breaker reliability and structured observability throughout.
+
+Built to answer one question most teams avoid: *are we using the right model for each request, or just the most expensive one?*
 
 ---
 
-## Why this exists
+## How It Works
 
-Most teams send every prompt to the most expensive model. This is wasteful: simple questions ("What is Python?") don't need GPT-4 level reasoning. Complex analytical prompts do.
+Every request passes through four stages:
 
-This engine automatically routes to the right tier, measures the outcome, and lets you A/B test routing policies — so you can make cost/quality trade-offs with data, not guesses.
+```
+Prompt
+  │
+  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  1. Complexity Scoring                                          │
+│     16 weighted signals: keyword intent, length, sentence       │
+│     density, question count → score in [0.0, 1.0]              │
+└──────────────────────┬──────────────────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  2. Routing Policy                                              │
+│     score ≥ threshold  →  premium tier                         │
+│     score  < threshold  →  cheap tier                           │
+│     experiment_mode override: always_cheap | always_premium     │
+└──────────────────────┬──────────────────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  3. Reliable Provider Call                                      │
+│     Circuit breaker (CLOSED → OPEN → HALF_OPEN)                │
+│     Retry with exponential backoff                              │
+│     Auto-fallback: cheap failure → premium                      │
+└──────────────────────┬──────────────────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  4. Telemetry + Evaluation                                      │
+│     SQLite persistence · per-request cost · quality proxy       │
+│     request_id tracing · structured JSON logs                   │
+└─────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+Response: completion + route decision + cost + quality score + request_id
+```
+
+---
+
+## Benchmark Results
+
+Evaluated on a labeled dataset of 50 prompts spanning simple factual queries through complex multi-step architectural analysis.
+
+| Policy | Routing Accuracy | Cost / 50 Requests | vs Always-Premium |
+|---|---|---|---|
+| **`router_v1`** | **80%** | **$0.004313** | **−65.6%** |
+| `always_cheap` | 60% | $0.000465 | −96.3% |
+| `always_premium` | 40% | $0.012525 | baseline |
+
+**Key finding:** `always_cheap` is not the answer — it under-provisions complex prompts and degrades output quality. `router_v1` finds the optimal operating point: the cheapest routing that keeps quality acceptable.
+
+---
+
+## System Design
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                          FastAPI Service                           │
+│                                                                    │
+│   POST /v1/route/infer          GET /v1/metrics/summary            │
+│   GET  /v1/eval/events          GET /v1/circuit-breaker/status     │
+│                                 GET /health                        │
+│                                                                    │
+│  RequestLoggingMiddleware                                          │
+│  → X-Request-ID propagation · X-Latency-MS · structured JSON logs │
+│                                                                    │
+│  ┌──────────────────┐    ┌──────────────────────────────────────┐  │
+│  │ ComplexityScorer │───▶│         RoutingEngine                │  │
+│  │                  │    │                                      │  │
+│  │ Keyword weights  │    │  ExperimentMode:                     │  │
+│  │ Length signal    │    │    router_v1 (default)               │  │
+│  │ Sentence count   │    │    always_cheap                      │  │
+│  │ Question density │    │    always_premium                    │  │
+│  │ Simplicity hints │    └────────────────┬─────────────────────┘  │
+│  └──────────────────┘                     │                        │
+│                                           ▼                        │
+│                              ┌────────────────────────┐            │
+│                              │    CircuitBreaker      │            │
+│                              │  CLOSED→OPEN→HALF_OPEN │            │
+│                              │  + retry backoff       │            │
+│                              └──────────┬─────────────┘            │
+│                                         │                          │
+│                              ┌──────────▼─────────────┐            │
+│                              │    Model Provider       │            │
+│                              │  cheap  │  premium      │            │
+│                              └──────────┬──────────────┘            │
+│                                         │                          │
+│  ┌──────────────────────────────────────▼───────────────────────┐  │
+│  │                  Telemetry Store (SQLite)                    │  │
+│  │  request_id · created_at · tier · cost · latency · tokens   │  │
+│  │  complexity_score · experiment_mode · quality_score          │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────▼──────────────┐
+                    │   Streamlit Dashboard         │
+                    │  Tier split · Cost trend      │
+                    │  Latency dist · Mode compare  │
+                    │  Benchmark: cost vs accuracy  │
+                    └───────────────────────────────┘
+```
+
+---
+
+## API
+
+### `POST /v1/route/infer`
+
+Routes a prompt and returns routing decision, completion, cost, quality, and tracing metadata.
+
+**Request**
+```json
+{
+  "prompt": "Analyze the trade-offs between CQRS and event sourcing for a banking system.",
+  "experiment_mode": "router_v1"
+}
+```
+
+**Response**
+```json
+{
+  "request_id": "3f8a2c14-91e7-4b2d-bc43-7a1d9e204f88",
+  "route": {
+    "selected_tier": "premium",
+    "complexity_score": 0.7250,
+    "reason_codes": ["complexity_hints_present", "multi_sentence", "threshold=0.5"]
+  },
+  "completion": "...",
+  "usage": {
+    "input_tokens": 24,
+    "output_tokens": 187
+  },
+  "latency_ms": 312.5,
+  "estimated_cost_usd": 0.00003125,
+  "fallback_used": false,
+  "experiment_mode": "router_v1",
+  "quality": {
+    "keyword_recall": 0.82,
+    "length_ratio": 1.0,
+    "tier_alignment": 1.0,
+    "total": 0.927,
+    "acceptable": true
+  }
+}
+```
+
+### Other endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Service health check |
+| `GET /v1/metrics/summary` | Aggregated stats by tier and experiment mode |
+| `GET /v1/eval/events?limit=100` | Paginated raw telemetry events |
+| `GET /v1/circuit-breaker/status` | Current breaker state |
+| `GET /docs` | Auto-generated OpenAPI / Swagger UI |
+
+---
+
+## Experiment Modes
+
+Each request can declare an `experiment_mode` to override the routing policy. This enables controlled A/B testing between policies without changing service configuration.
+
+| Mode | Behaviour |
+|---|---|
+| `router_v1` | Complexity-scored routing (production default) |
+| `always_cheap` | Force cheap tier — cost floor baseline |
+| `always_premium` | Force premium tier — quality ceiling baseline |
+
+Telemetry records the mode on every event. The metrics summary breaks down cost and request counts by mode, so you can compare policies with real traffic.
+
+---
+
+## Quality Scoring
+
+Every response includes a quality proxy score computed at inference time — no external LLM judge required.
+
+| Signal | Weight | Description |
+|---|---|---|
+| `keyword_recall` | 40% | Key terms from the prompt present in the completion |
+| `length_ratio` | 30% | Completion length relative to tier-appropriate floor |
+| `tier_alignment` | 30% | Penalty when a complex prompt is routed to cheap tier |
+
+A score ≥ 0.70 is considered acceptable. Scores below threshold flag potential routing mistakes for review.
+
+---
+
+## Reliability
+
+The provider call path is hardened at three levels:
+
+1. **Retry with exponential backoff** — transient failures are retried up to N times before escalating
+2. **Circuit breaker** — trips after N consecutive failures; enters HALF_OPEN after a recovery timeout to probe health before resuming traffic
+3. **Automatic tier fallback** — cheap tier failure triggers an immediate retry on premium; circuit breaker open on cheap routes all traffic to premium until recovery
+
+These operate at the routing engine level, not the provider level, so fallback decisions have full context — including whether the request is already on a fallback path.
+
+---
+
+## Running Locally
+
+**Prerequisites:** Python 3.13, git
+
+```bash
+git clone https://github.com/manjeetkumar53/llm-routing-engine.git
+cd llm-routing-engine
+
+python3.13 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+**Start the API**
+```bash
+uvicorn app.main:app --reload
+# Swagger UI → http://127.0.0.1:8000/docs
+```
+
+**Run the benchmark**
+```bash
+python -m benchmark.run
+# Outputs cost savings %, routing accuracy, p95 latency per mode
+```
+
+**Open the analytics dashboard**
+```bash
+streamlit run dashboard/app.py
+```
+
+**Run tests**
+```bash
+pytest -v
+# 31 tests: routing decisions, complexity scoring, reliability, quality eval, API contracts
+```
+
+---
+
+## Configuration
+
+All settings are read from environment variables. Copy `.env.example` and adjust.
+
+```env
+ROUTER_COMPLEXITY_THRESHOLD=0.50       # Prompts scoring >= this route to premium
+CHEAP_INPUT_PRICE_PER_1M=0.15         # USD per 1M input tokens (cheap tier)
+CHEAP_OUTPUT_PRICE_PER_1M=0.60
+PREMIUM_INPUT_PRICE_PER_1M=5.00       # USD per 1M input tokens (premium tier)
+PREMIUM_OUTPUT_PRICE_PER_1M=15.00
+TELEMETRY_DB=telemetry.db             # SQLite file path
+```
+
+---
+
+## Design Decisions
+
+**Rule-based scorer over ML classifier**
+A weighted rule system is explainable, zero-latency, and immediately debuggable. Each routing decision includes `reason_codes` so you can trace exactly why a prompt was sent to a given tier. The scoring weights are parameterized; a learned classifier is the natural next step once enough labeled routing decisions accumulate.
+
+**Proxy quality scorer over LLM-as-judge**
+Running a judge model on every inference request doubles cost and adds latency on the critical path. The proxy (keyword recall + length + tier alignment) catches the most important class of failure — sending a complex prompt to the cheap model — and operates in microseconds. Post-hoc batch evaluation with an LLM judge remains an option for periodic quality audits.
+
+**Circuit breaker at the engine level, not provider level**
+The routing engine owns fallback logic. Placing the breaker here means fallback decisions have full context: which tier was originally selected, whether we're already in a fallback path, and what the current experiment mode is.
+
+**SQLite for telemetry persistence**
+Removes all operational overhead for the initial deployment. The schema is standard SQL; moving to PostgreSQL is a connection string change. At 10K requests/day, SQLite is not the bottleneck.
+
+---
+
+## Project Structure
+
+```
+app/
+├── config.py              Environment-based settings
+├── experiment.py          ExperimentMode enum
+├── main.py                FastAPI application and endpoint definitions
+├── middleware.py          Structured JSON logging, X-Request-ID propagation
+├── models.py              Pydantic request/response models
+├── reliability.py         CircuitBreaker + retry_with_backoff
+├── router.py              RoutingEngine — orchestrates all layers
+└── providers/
+│   └── mock_provider.py   Provider interface (swap in real adapters here)
+└── services/
+    ├── complexity.py       Weighted prompt complexity scorer (16 signals)
+    ├── costing.py          Per-request token cost estimation
+    ├── evaluation.py       Quality proxy scoring
+    └── telemetry.py        SQLite-backed event store
+
+benchmark/
+├── prompts.json           50-prompt labeled evaluation dataset
+├── run.py                 Benchmark runner: cost, accuracy, latency by mode
+└── results.json           Most recent benchmark output
+
+dashboard/
+└── app.py                 Streamlit analytics dashboard (6 charts + KPIs)
+
+tests/                     31 tests across all modules
+```
+
+---
+
+## License
+
+MIT
+
 
 ---
 
