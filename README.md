@@ -111,6 +111,18 @@ curl -X POST http://127.0.0.1:8000/v1/route/infer \
 
 ## Product Surfaces
 
+### Routing Flow Demo
+
+This short demo shows the core loop: inspect the API, send prompts through the router, and watch telemetry surface in the analytics layer.
+
+![Routing Flow Demo](assets/demo/routing-flow.gif)
+
+Regenerate it locally with:
+
+```bash
+python scripts/generate_demo_gif.py
+```
+
 ### Swagger UI
 
 The API ships with an interactive OpenAPI surface for manual testing and request inspection.
@@ -403,9 +415,14 @@ The engine protects the provider call path with two attempts through `retry_with
 
 ```text
 assets/
+  demo/
+    routing-flow.gif
   screenshots/
     dashboard-overview.png
     swagger-ui.png
+
+scripts/
+  generate_demo_gif.py
 
 app/
   config.py
